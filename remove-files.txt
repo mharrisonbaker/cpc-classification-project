@@ -1,0 +1,4 @@
+experimental/notebooks/g06f-40-processing-notebook.ipynb
+experimental/notebooks/g06f40_to_json.ipynb
+experimental/notebooks/g06q_to_json.ipynb
+experimental/notebooks/g10l_to_json.ipynb
