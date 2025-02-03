@@ -14,6 +14,9 @@ BATCH_SIZE = 100
 RETRY_ATTEMPTS = 3
 RETRY_DELAY = 5  # seconds
 
+# LLM settings
+LLM_MODEL = "phi4:14b"
+
 # Database tables
 PROCESSED_TABLE = "processed_symbols"
 STATS_TABLE = "processing_stats"

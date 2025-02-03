@@ -25,7 +25,7 @@ CPC_SCHEMA = {
         },
         "level": {
             "type": "string",
-            "enum": ["section", "class", "subclass", "group", "subgroup"]
+            "enum": ["section", "class", "subclass", "group", "subgroup", "main-group"]
         },
         "parent_symbol": {
             "type": ["string", "null"]

@@ -97,3 +97,4 @@ def validate_extraction_directory(extract_dir: str) -> Tuple[bool, Optional[str]
             return False, f"Invalid XML file ({xml_file}): {error}"
             
     return True, None
+

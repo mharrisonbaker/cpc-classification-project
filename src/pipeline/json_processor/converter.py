@@ -52,6 +52,12 @@ class CPCJsonConverter:
         # Create output directory
         output_dir = os.path.join(self.output_dir, version, PROCESSED_DIR_NAME)
         os.makedirs(output_dir, exist_ok=True)
+
+        # Check if JSON files already exist
+        existing_jsons = len(list(Path(output_dir).glob("*.json")))
+        if existing_jsons > 0:
+            logger.info(f"Found {existing_jsons} existing JSON files, skipping conversion.")
+            return output_dir, self.conversion_stats
         
         # Process all XML files
         xml_files = [f for f in os.listdir(xml_dir) if f.endswith('.xml')]
