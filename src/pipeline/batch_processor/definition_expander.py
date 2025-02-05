@@ -28,21 +28,19 @@ class CPCDefinitionExpander:
         # Set up logging
         self._setup_logging()
         
-        # Validation patterns
-        self.validation_patterns = {
-            'min_words': 15,
-            'max_words': 100,
-            'unwanted_starts': [
-                r'^this (category|classification|group|section)',
-                r'^these (categories|classifications|groups)',
-                r'^refers to',
-                r'^pertaining to'
-            ],
-            'required_patterns': [
-                r'[A-Z0-9]',  # Must contain at least one uppercase letter or number
-                r'\b(device|system|method|process|apparatus|technique|mechanism)\b'  # Technical terms
-            ]
-        }
+        # # Validation patterns
+        # self.validation_patterns = {
+        #     'min_words': 15,
+        #     'max_words': 100,
+        #     'unwanted_starts': [
+        #         r'^this (category|classification|group|section)',
+        #         r'^these (categories|classifications|groups)',
+        #         r'^refers to',
+        #         r'^pertains to',
+        #         r'^the cpc',
+        #         r'^cpc classification'
+        #     ]
+        # }
 
     def _setup_logging(self):
         """Configure logging with both file and console handlers."""
@@ -70,100 +68,95 @@ class CPCDefinitionExpander:
         self.logger.addHandler(fh)
         self.logger.addHandler(ch)
 
-    def get_definition(self, 
-                      symbol: str, 
-                      title: str, 
-                      metadata: Dict,
-                      parent_info: Optional[Dict] = None,
-                      retries: int = 3) -> str:
-        """
-        Gets an expanded definition for a CPC category, with retries and validation.
-        """
-        # Check cache first
-        cache_key = f"{symbol}_{hash(str(metadata))}"
-        if cache_key in self.cache:
-            return self.cache[cache_key]
+    def get_definition(self, symbol: str, title: str, metadata: Dict,
+                  parent_info: Optional[Dict] = None, retries: int = 3) -> str:
+        try:
+            cache_key = f"{symbol}_{hash(str(metadata))}"
+            if cache_key in self.cache:
+                self.stats.cache_hits += 1
+                return self.cache[cache_key]
 
-        prompt = self._construct_prompt(symbol, title, metadata, parent_info)
-        
-        for attempt in range(retries):
-            try:
-                response = ollama.chat(model=self.model, messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a patent classification expert. Provide technical, precise definitions."
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ])
-                
-                definition = response['message']['content'].strip()
-                
-                # Validate and format
-                definition = self._format_definition(definition)
-                is_valid, validation_msg = self._validate_definition(definition)
-                
-                if is_valid:
-                    self.cache[cache_key] = definition
-                    self.stats.successful += 1
-                    return definition
+            prompt = self._construct_prompt(symbol, title, metadata, parent_info)
+            
+            for attempt in range(retries):
+                try:
+                    response = ollama.chat(model=self.model, messages=[
+                        {
+                            "role": "system",
+                            "content": "You are a patent classification expert. Provide technical, precise definitions."
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ])
                     
-                self.logger.warning(f"⚠️ Invalid definition for {symbol}: {validation_msg}")
-                
-            except Exception as e:
-                self.logger.error(f"❌ Error generating definition for {symbol}: {e}")
-        
-        self.stats.failed += 1
-        return f"Error: Unable to generate valid definition for {symbol}"
+                    definition = response['message']['content'].strip()
+                    definition = self._format_definition(definition)
+                    is_valid, validation_msg = self._validate_definition(definition)
+                    
+                    if is_valid:
+                        self.cache[cache_key] = definition
+                        self.stats.successful += 1
+                        return definition
+                    
+                    self.logger.warning(f"Attempt {attempt + 1} failed validation for {symbol}: {validation_msg}")
+                    
+                except (ollama.RequestError, TimeoutError) as e:
+                    self.logger.warning(f"Attempt {attempt + 1} for {symbol} failed: {str(e)}")
+                    if attempt == retries - 1:
+                        raise
+                except KeyboardInterrupt:
+                    self.logger.info(f"Interrupted during definition generation for {symbol}")
+                    raise
+                except Exception as e:
+                    self.logger.error(f"Unexpected error generating definition for {symbol}: {str(e)}", exc_info=True)
+                    if attempt == retries - 1:
+                        raise
+                    
+        except Exception as e:
+            self.stats.failed += 1
+            return f"Error: {str(e)}"
 
     def _construct_prompt(self, symbol: str, title: str, metadata: Dict, 
-                         parent_info: Optional[Dict] = None) -> str:
+                     parent_info: Optional[Dict] = None) -> str:
         """Construct a detailed prompt for the LLM."""
         context_parts = [
-            "Provide a technical definition for this CPC classification:",
+            "Technical Definition Task:",
             f"Symbol: {symbol}",
             f"Title: {title}"
         ]
 
         if parent_info:
             context_parts.extend([
-                "Parent Context:",
-                f"- Symbol: {parent_info['symbol']}",
-                f"- Title: {parent_info['title']}"
+                "\nHierarchical Context:",
+                f"Parent Symbol: {parent_info['symbol']}",
+                f"Parent Title: {parent_info['title']}",
+                "\nNote: Define only what THIS specific classification adds beyond its parent. Do not repeat the parent's scope."
             ])
 
         instructions = [
-            "Requirements:",
-            "1. Start with key technical terms",
-            "2. Focus on specific technical characteristics",
-            "3. Use precise industry terminology",
-            "4. Keep definition concise but complete",
-            "5. Include specific technical components or methods"
+            "\nInstructions:",
+            "1. Start directly with the technical content - DO NOT mention CPC or say 'pertains to'",
+            "2. Focus on what makes this classification unique",
+            "3. If this is a subgroup, explain what specializes it from its parent",
+            "4. Use precise industry terminology",
+            "5. Keep definition focused and concise",
+            "\nExample Format:",
+            "[Bad] 'CPC classification A01B1/02 pertains to spades...'",
+            "[Good] 'Manually operated spades with specific blade geometries for precise soil excavation...'",
         ]
 
         return "\n".join(context_parts + instructions)
 
     def _validate_definition(self, definition: str) -> tuple[bool, str]:
-        """Validate the generated definition against quality criteria."""
         word_count = len(definition.split())
         
-        if word_count < self.validation_patterns['min_words']:
+        if word_count < 15:
             return False, "Definition too short"
             
-        if word_count > self.validation_patterns['max_words']:
+        if word_count > 150:
             return False, "Definition too long"
-            
-        # Check for unwanted starting phrases
-        for pattern in self.validation_patterns['unwanted_starts']:
-            if re.match(pattern, definition.lower()):
-                return False, "Starts with unwanted phrase"
-                
-        # Check for required patterns
-        for pattern in self.validation_patterns['required_patterns']:
-            if not re.search(pattern, definition):
-                return False, f"Missing required pattern: {pattern}"
                 
         return True, "Valid"
 
@@ -192,6 +185,24 @@ class CPCDefinitionExpander:
             definition += '.'
             
         return definition
+    
+    def process_hierarchy(self, data: List[Dict]) -> List[Dict]:
+        def process_item(item: Dict) -> Dict:
+            if 'symbol' in item and 'title' in item:
+                self.stats.total_processed += 1
+                item['expanded_definition'] = self.get_definition(
+                    item['symbol'],
+                    item.get('title'),  # Pass entire title object
+                    item.get('metadata', {}),
+                    item.get('parent_info')
+                )
+                
+            if 'children' in item and item['children']:
+                item['children'] = [process_item(child) for child in item['children']]
+                
+            return item
+        
+        return [process_item(item) for item in data]
 
     def expand_definitions(self, input_file: str, output_file: str) -> None:
         """Main method to expand definitions for an entire CPC hierarchy."""

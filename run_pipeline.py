@@ -5,6 +5,8 @@ from src.pipeline.json_processor import CPCJsonConverter
 from src.pipeline.batch_processor import BatchProcessor
 import logging
 import urllib3
+import os
+import signal
 
 
 urllib3.disable_warnings()
@@ -16,6 +18,17 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+def setup_interrupt_handling():
+    def signal_handler(signum, frame):
+        print("\nReceived interrupt signal. Cleaning up...")
+        raise KeyboardInterrupt()
+
+    if os.name == 'nt':  # Windows
+        signal.signal(signal.SIGINT, signal_handler)
+    else:
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
 
 def run_pipeline():
     try:
@@ -47,4 +60,5 @@ def run_pipeline():
         raise
 
 if __name__ == "__main__":
+    setup_interrupt_handling()
     run_pipeline()

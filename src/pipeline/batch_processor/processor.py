@@ -1,6 +1,7 @@
 """Batch processor for CPC definitions with resume capability."""
 
 import os
+import re  
 import json
 import time
 import logging
@@ -33,6 +34,9 @@ class ProcessingState:
     start_time: datetime
     last_update: datetime
 
+from .definition_expander import CPCDefinitionExpander  
+
+
 class BatchProcessor:
     def __init__(self, version: str, base_dir: str):
         self.version = version
@@ -44,21 +48,35 @@ class BatchProcessor:
         self._init_logging()
         self._init_state_db()
         
+        self.cache = {}
+
+        #  Fix: Use CPCDefinitionExpander
+        self.expander = CPCDefinitionExpander(model_name=LLM_MODEL)
+
+    def setup_interrupt_handling():
+        def signal_handler(signum, frame):
+            print("\nReceived interrupt signal. Cleaning up...")
+            raise KeyboardInterrupt()
+
+        if os.name == 'nt':  # Windows
+            signal.signal(signal.CTRL_C_EVENT, signal_handler)
+        else:  # Unix/Linux/Mac
+            signal.signal(signal.SIGINT, signal_handler)
+        
     def _init_logging(self):
-        """Initialize logging configuration."""
         self.logger = logging.getLogger(f"BatchProcessor-{self.version}")
         self.logger.setLevel(logging.INFO)
         
-        # File handler
+        # File handler - keeps INFO level
         fh = logging.FileHandler(
             self.log_dir / f"batch_process_{datetime.now():%Y%m%d_%H%M%S}.log"
         )
         fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         self.logger.addHandler(fh)
         
-        # Console handler
+        # Console handler - change to WARNING
         ch = logging.StreamHandler()
-        ch.setLevel(logging.INFO)
+        ch.setLevel(logging.WARNING)  # Changed from INFO to WARNING
         ch.setFormatter(logging.Formatter('%(levelname)s - %(message)s'))
         self.logger.addHandler(ch)
 
@@ -88,6 +106,34 @@ class BatchProcessor:
                 (symbol, status, error)
             )
 
+    def process_directory(self, input_dir):
+        input_dir = Path(input_dir)
+        processed_symbols = self.get_processed_symbols()
+        json_files = list(input_dir.glob('*.json'))
+        total_files = len(json_files)
+
+        self.logger.info(f"Found {total_files} JSON files to process")
+
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {
+                executor.submit(self.process_json_file, json_path, processed_symbols): json_path
+                for json_path in json_files
+            }
+            
+            completed = 0
+            for future in futures:
+                json_path = futures[future]
+                try:
+                    future.result()  # Wait for completion
+                    completed += 1
+                    self.logger.info(f"Completed {json_path.name} ({completed}/{total_files})")
+                except KeyboardInterrupt:
+                    self.logger.warning("Process interrupted! Cleaning up...")
+                    executor.shutdown(wait=False)
+                    raise
+                except Exception as e:
+                    self.logger.error(f"Failed to process {json_path.name}: {e}")     
+
     def get_processed_symbols(self) -> Set[str]:
         """Get set of already processed symbols."""
         with sqlite3.connect(self.state_db) as conn:
@@ -105,22 +151,7 @@ class BatchProcessor:
     def generate_definition(self, symbol: str, title: Dict[str, str]) -> str:
         """Generate expanded definition using Ollama."""
         print(f"\nGenerating definition for {symbol}")
-        
-        # Validation patterns
-        self.validation_patterns = {
-            'min_words': 15,
-            'max_words': 100,
-            'unwanted_starts': [
-                r'^this (category|classification|group|section)',
-                r'^these (categories|classifications|groups)',
-                r'^refers to',
-                r'^pertaining to'
-            ],
-            'required_patterns': [
-                r'[A-Z0-9]',
-                r'\b(device|system|method|process|apparatus|technique|mechanism)\b'
-            ]
-        }
+        self.logger.info(f"Generating definition for {symbol}")
         
         # Cache check
         cache_key = f"{symbol}_{hash(str(title))}"
@@ -165,23 +196,35 @@ class BatchProcessor:
                 print(f"Error: {e}")
                 
         return f"Error: Unable to generate valid definition for {symbol}"
+    
+    def _construct_prompt(self, symbol: str, title_text: str) -> str:
+        """Construct a detailed prompt for the LLM."""
+        return f"""
+        Provide a precise, technical definition for the CPC classification:
+        
+        - Symbol: {symbol}
+        - Title: {title_text}
+
+        Instructions:
+        1. Use industry-specific terminology.
+        2. Clearly explain the technical scope.
+        3. Keep the response between 15-100 words.
+        4. Format in full sentences.
+
+        Example:
+        "A01B 1/00 refers to soil-working tools designed for breaking, loosening, or conditioning soil before planting."
+        """
+
 
     def _validate_definition(self, definition: str) -> tuple[bool, str]:
+        """Validate definition length only."""
         word_count = len(definition.split())
         
-        if word_count < self.validation_patterns['min_words']:
-            return False, "Definition too short"
+        if word_count < 15:
+            return False, f"Definition too short ({word_count} words)"
             
-        if word_count > self.validation_patterns['max_words']:
-            return False, "Definition too long"
-            
-        for pattern in self.validation_patterns['unwanted_starts']:
-            if re.match(pattern, definition.lower()):
-                return False, "Starts with unwanted phrase"
-                
-        for pattern in self.validation_patterns['required_patterns']:
-            if not re.search(pattern, definition):
-                return False, f"Missing required pattern: {pattern}"
+        if word_count > 150:
+            return False, f"Definition too long ({word_count} words)"
                 
         return True, "Valid"
 
@@ -206,70 +249,77 @@ class BatchProcessor:
         return definition
 
     def process_json_file(self, json_path: Path, processed_symbols: Set[str]):
-        """Process a single JSON file, skipping already processed symbols."""
+        """Process a single JSON file, level by level, with resume capability."""
         self.logger.info(f"Processing {json_path}")
-        
-        with open(json_path) as f:
-            data = json.load(f)
-        
-        def process_item(item: Dict) -> Dict:
-            """Process a single CPC item and its children."""
-            symbol = item['symbol']
-            
-            if symbol not in processed_symbols:
-                try:
-                    item['expanded_definition'] = self.generate_definition(
-                        symbol,
-                        item['title']
-                    )
-                    self.save_state(symbol, STATUS_COMPLETED)
-                except Exception as e:
-                    self.logger.error(f"Failed to process {symbol}: {e}")
-                    self.save_state(symbol, STATUS_FAILED, str(e))
-            
-            if 'children' in item and item['children']:
-                item['children'] = [process_item(child) for child in item['children']]
-            
-            return item
 
-        processed_data = [process_item(item) for item in data]
-        
-        # Save to batch output directory
         expanded_dir = Path(BATCH_OUTPUT_DIR) / self.version / "expanded_json"
-        expanded_dir.mkdir(parents=True, exist_ok=True)
         output_path = expanded_dir / json_path.name
         
-        with open(output_path, 'w') as f:
-            json.dump(processed_data, f, indent=2)
+        # Check if file exists and contains valid expanded definitions
+        if output_path.exists():
+            try:
+                with open(output_path, encoding="utf-8") as f:
+                    existing_data = json.load(f)
+                if any('expanded_definition' in item for item in existing_data):
+                    self.logger.info(f"Skipping {json_path} - already processed")
+                    return
+            except json.JSONDecodeError:
+                self.logger.warning(f"Found corrupt expanded JSON: {output_path}")
 
-    def process_directory(self, input_dir):
-        """Process all JSON files in directory with resume capability."""
-        input_dir = Path(input_dir)  # Convert string to Path
-        processed_symbols = self.get_processed_symbols()
-        failed_symbols = self.get_failed_symbols()
-        
-        self.logger.info(f"Resuming processing. Already processed: {len(processed_symbols)}")
-        if failed_symbols:
-            self.logger.warning(f"Previously failed symbols: {len(failed_symbols)}")
-        
-        json_files = list(input_dir.glob('*.json'))
-        total_files = len(json_files)
-        
-        self.logger.info(f"Found {total_files} JSON files to process")
-        
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = []
-            for json_path in json_files:
-                futures.append(
-                    executor.submit(self.process_json_file, json_path, processed_symbols)
-                )
-            
-            for i, future in enumerate(futures, 1):
+        with open(json_path, encoding="utf-8") as f:
+            data = json.load(f)
+
+        def process_level(items: List[Dict], level: int = 0):
+            for item in items:
                 try:
-                    future.result()
-                    self.logger.info(f"Completed file {i}/{total_files}")
+                    symbol = item['symbol']
+                    if symbol not in processed_symbols and 'expanded_definition' not in item:
+                        definition = self.generate_definition(symbol, item['title'])
+                        if definition and "Error" not in definition:
+                            item['expanded_definition'] = definition
+                            self.save_state(symbol, STATUS_COMPLETED)
+                            self.logger.info(f"Level {level}: Added definition for {symbol}")
+                        else:
+                            self.logger.warning(f"Level {level}: No valid definition for {symbol}")
+                            self.save_state(symbol, STATUS_FAILED, "No valid definition")
+
+                except KeyboardInterrupt:
+                    self.logger.warning("Interrupted during processing!")
+                    raise
                 except Exception as e:
-                    self.logger.error(f"Failed to process file {i}: {e}")
+                    self.logger.error(f"Error processing symbol: {e}")
+                    continue
+
+            # Process children after current level
+            for item in items:
+                if 'children' in item and item['children']:
+                    process_level(item['children'], level + 1)
+        
+        temp_path = None
+        try:
+            process_level(data)
+            expanded_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Atomic write using temporary file
+            temp_path = output_path.with_suffix('.tmp')
+            with open(temp_path, 'w', encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            temp_path.replace(output_path)
+            
+        except KeyboardInterrupt:
+            self.logger.warning(f"Processing interrupted for {json_path}")
+            if temp_path and temp_path.exists():
+                temp_path.unlink()
+            self._cleanup_interrupted_state()  # Add this method
+            raise
+        except Exception as e:
+            self.logger.error(f"Error processing {json_path}: {str(e)}", exc_info=True)
+            if temp_path and temp_path.exists():
+                temp_path.unlink()
+            raise
+
+        self.logger.info(f"Completed processing: {output_path}")
+
 
     def get_processing_stats(self) -> Dict:
         """Get processing statistics."""
@@ -298,8 +348,12 @@ class BatchProcessor:
                         (STATUS_FAILED,))
         self.logger.info("Cleaned failed states")
 
-    def signal_handler(sig, frame):
-        print("\nStopping processing gracefully...")
-        sys.exit(0)
-
-        signal.signal(signal.SIGINT, signal_handler)
+    def _cleanup_interrupted_state(self):
+        """Clean up state after interruption"""
+        with sqlite3.connect(self.state_db) as conn:
+            conn.execute('''
+                UPDATE processed_symbols 
+                SET status = ? 
+                WHERE status = ?''', 
+                (STATUS_FAILED, STATUS_PROCESSING)
+            )
