@@ -208,11 +208,20 @@ class BatchProcessor:
         Instructions:
         1. Use industry-specific terminology.
         2. Clearly explain the technical scope.
-        3. Keep the response between 15-100 words.
+        3. Keep the response between 15-300 words.
         4. Format in full sentences.
+        5. Do NOT start with vague phrases like "This category pertains to..."
+        6. Include key functionalities and applications.
+        7. Do not repeat the symbol in the expanded definition itself.
 
-        Example:
-        "A01B 1/00 refers to soil-working tools designed for breaking, loosening, or conditioning soil before planting."
+        **Examples:**
+        1. Symbol: F16C33/00
+        Title: Bearings for Pivotable Joints  
+        Expanded Definition: Bearings designed to facilitate pivoting motion in mechanical systems, reducing friction and wear. Commonly used in robotic arms, automotive suspensions, and aerospace control surfaces.
+
+        2. Symbol: G06N3/08
+        Title: Machine Learning Models Using Neural Networks  
+        Expanded Definition: Computational models that simulate human brain functions, leveraging deep learning architectures like CNNs, RNNs, and Transformers. Used in speech recognition, NLP, and predictive analytics.
         """
 
 
@@ -223,7 +232,7 @@ class BatchProcessor:
         if word_count < 15:
             return False, f"Definition too short ({word_count} words)"
             
-        if word_count > 150:
+        if word_count > 300:
             return False, f"Definition too long ({word_count} words)"
                 
         return True, "Valid"
